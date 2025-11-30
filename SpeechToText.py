@@ -1,81 +1,123 @@
-import whisper
-from pydub import AudioSegment, effects
-import noisereduce as nr
-import soundfile as sf
 import os
+import whisper
+import soundfile as sf
+import noisereduce as nr
+from pathlib import Path
+from pydub import AudioSegment, effects
 from tqdm import tqdm
 
-#Input & output setup
-input_file = "audio_four.m4a" #set your own audio file
-base_name, _ = os.path.splitext(input_file)
-wav_file = f"{base_name}.wav"
-cleaned_file = f"{base_name}_cleaned.wav"
 
-#Convert M4A to WAV & normalize
-print("Converting and normalizing audio")
-audio = AudioSegment.from_file(input_file)
-audio = audio.set_channels(1)
-audio = effects.normalize(audio)
-audio.export(wav_file, format="wav")
+MODEL_SIZE = "medium"
+CHUNK_LENGTH_MS = 30 * 1000
+OVERLAP_MS = 3000
+temp_files = []
 
-#Noise reduction
-print("Reducing background noise")
-data, rate = sf.read(wav_file)
-reduced = nr.reduce_noise(y=data, sr=rate, prop_decrease=0.85)
-sf.write(cleaned_file, reduced, rate)
 
-#Load Whisper model
-print("Loading Whisper model")
-model = whisper.load_model("large")  #tiny, base, small, medium, large
+def convert(input_path: Path) -> Path:
 
-#Split audio into manageable chunks ---
-print("Splitting audio into chunks")
-audio = AudioSegment.from_wav(cleaned_file)
-chunk_length_ms = 30 * 1000  # 30 seconds per chunk
-overlap_ms = 3000            # 3 second overlap between chunks
+    print(f"Converting: {input_path.name}")
 
-chunks = []
-for start in range(0, len(audio), chunk_length_ms - overlap_ms):
-    end = min(start + chunk_length_ms, len(audio))
-    chunk = audio[start:end]
-    chunk_name = f"{base_name}_chunk_{start//1000}-{end//1000}.wav"
-    chunk.export(chunk_name, format="wav")
-    chunks.append(chunk_name)
+    output_path = input_path.with_suffix('.wav')
 
-print(f"Created {len(chunks)} chunks.")
+    try:
+        audio = AudioSegment.from_file(input_path)
+        audio = audio.set_channels(1)
+        audio = effects.normalize(audio)
+        audio.export(output_path, format="wav")
 
-#Transcribe each chunk and merge the results
-print("Transcribing chunks")
-full_transcript = []
+        temp_files.append(output_path)
+        return output_path
+    except Exception as e:
+        raise RuntimeError(f"Failed to process audio file: {e}")
 
-for i, chunk_file in enumerate(tqdm(chunks, desc="Transcribing", unit="chunk")):
-    result = model.transcribe(
-        chunk_file,
-        fp16=False,
-        temperature=0.0,
-        beam_size=5,
-        best_of=5,
-        language=None  #automatically pick the language
-    )
-    text = result.get("text", "").strip()
-    full_transcript.append(text)
 
-#Merge and clean up
-final_text = "\n".join(full_transcript)
+def reduce_noise(input_wav: Path) -> Path:
 
-print("\nFinal Transcription:")
-print("=" * 60)
-print(final_text)
-print("=" * 60)
+    print("Noise reduction...")
 
-#Save transcription to file
-output_file = f"{base_name}_transcription.txt"
-with open(output_file, "w", encoding="utf-8") as f:
-    f.write(final_text)
+    cleaned_path = input_wav.with_name(f"{input_wav.stem}_cleaned.wav")
+    data, rate = sf.read(input_wav)
+    reduced_noise_data = nr.reduce_noise(y=data, sr=rate, prop_decrease=0.85)
+    sf.write(cleaned_path, reduced_noise_data, rate)
+    temp_files.append(cleaned_path)
+    return cleaned_path
 
-print(f"\nSaved transcription to {output_file}")
 
-#Clean the chunks
-for chunk_file in chunks:
-    os.remove(chunk_file)
-print("Cleaned up temporary chunk files.")
+def create_chunks(audio_path: Path):
+    audio = AudioSegment.from_wav(audio_path)
+    total_length = len(audio)
+
+    print(f"Splitting audio into {CHUNK_LENGTH_MS / 1000}s chunks....")
+
+    for start in range(0, total_length, CHUNK_LENGTH_MS - OVERLAP_MS):
+        end = min(start + CHUNK_LENGTH_MS, total_length)
+        chunk = audio[start:end]
+        chunk_name = audio_path.with_name(f"temp_chunk_{start}_{end}.wav")
+        chunk.export(chunk_name, format="wav")
+        temp_files.append(chunk_name)
+
+        yield chunk_name
+
+
+def transcribe_audio(cleaned_path: Path, model_name: str) -> str:
+
+    print(f"Loading Whisper model: {model_name}...")
+    model = whisper.load_model(model_name)
+
+    transcripts = []
+    chunks = list(create_chunks(cleaned_path))
+
+    print("Start transcripting...")
+    for chunk_file in tqdm(chunks, desc="Processing chunks", unit="segment"):
+        result = model.transcribe(
+            str(chunk_file),
+            fp16=False,  # If you have a  GPU, set this to TRUE
+            language=None
+        )
+        text = result.get("text", "").strip()
+        transcripts.append(text)
+
+    return "\n".join(transcripts)
+
+
+def cleanup():
+    print("Delete temporary files...")
+    for file_path in temp_files:
+        if file_path.exists():
+            try:
+                os.remove(file_path)
+            except OSError:
+                print(f"Warning: Could not delete {file_path}")
+
+
+
+if __name__ == "__main__":
+
+    INPUT_FILE = Path("audio_four.m4a")
+
+    try:
+        if not INPUT_FILE.exists():
+            raise FileNotFoundError(f"Could not find file: {INPUT_FILE}")
+
+        wav_file = convert(INPUT_FILE)
+        clean_file = reduce_noise(wav_file)
+        full_text = transcribe_audio(clean_file, MODEL_SIZE)
+
+        print("\n" + "=" * 40)
+        print("FINAL TRANSCRIPTION")
+        print("=" * 40)
+        print(full_text[:500] + "... (truncated for display)")  # Print preview
+
+        output_filename = INPUT_FILE.with_name(f"{INPUT_FILE.stem}_transcript.txt")
+        with open(output_filename, "w", encoding="utf-8") as f:
+            f.write(full_text)
+
+        print(f"Save transcription to: {output_filename}")
+
+    except KeyboardInterrupt:
+        print("Process interrupted by user.")
+    except Exception as e:
+        print(f"\nAn error occurred: {e}")
+    finally:
+        # This runs whether the script succeeds OR fails
+        cleanup()
