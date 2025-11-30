@@ -38,9 +38,9 @@ pip install -r requirements.txt
 ```
 Install FFmpeg(it is required by pydub):
 ```bash
-brew install ffmpeg //For macOS
-sudo apt install ffmpeg  //For Ubuntu
-https://ffmpeg.org/download.html //For Windows
+brew install ffmpeg #For macOS
+sudo apt install ffmpeg  #For Ubuntu
+https://ffmpeg.org/download.html #For Windows
 ```
 Start to transcribe, make sure you add an m4a audio file in the SpeechToText directory:
 ```bash
